@@ -1,0 +1,49 @@
+plotpeakindex<-array(0,length(plotpeaks))
+k<-1
+for(i in 1:npeaks5)
+{peak<-as.numeric(dimnames(M5)[[2]][i])
+ if(plotpeaks[k]>peak-0.2 && plotpeaks[k]<peak+0.2)
+    {plotpeakindex[k]<-i
+	 k<-k+1
+	}
+}
+for(i in 1:length(plotpeakindex))
+{n<-n+1
+pn<-plotpeakindex[i]
+x<-as.numeric(conc)
+y<-avg5[,pn]
+fit<-lm(y~x)
+png(paste("subSpec_20_",dimnames(M5)[[2]][pn],".png"))
+plot(x,y)
+lines(x,predict(fit))
+dev.off()
+
+x<-log(as.numeric(conc))
+y<-log(avg5[,pn])
+fitlog<-lm(y~x)
+png(paste("subSpec_20_log_",dimnames(M5)[[2]][pn],".png"))
+plot(x,y)
+lines(x,predict(fitlog))
+dev.off()
+
+x<-as.numeric(conc)
+y<-avgnorm5[,pn]
+fitnorm<-lm(y~x)
+png(paste("subSpec_20_norm_",dimnames(M5)[[2]][pn],".png"))
+plot(x,y)
+lines(x,predict(fitnorm))
+dev.off()
+
+x<-log(as.numeric(conc))
+y<-log(avgnorm5[,pn])
+fitnormlog<-lm(y~x)
+png(paste("subSpec_20_norm_log_",dimnames(M5)[[2]][pn],".png"))
+plot(x,y)
+lines(x,predict(fitnormlog))
+dev.off()
+
+result[n,]<-c(coef(fit)[2],coef(fit)[1],summary(fit)$r.squared,coef(fitlog)[2],coef(fitlog)[1],summary(fitlog)$r.squared,coef(fitnorm)[2],coef(fitnorm)[1],summary(fitnorm)$r.squared,coef(fitnormlog)[2],coef(fitnormlog)[1],summary(fitnormlog)$r.squared)
+}
+
+write.table(result,file="result.txt",sep="\t")
+

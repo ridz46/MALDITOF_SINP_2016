@@ -1,0 +1,355 @@
+#importing libraries
+library(MALDIquant)
+library(MALDIquantForeign)
+library(rgl)
+library(stringr)
+library(gtools)
+library(neuralnet)
+
+#preprocessing
+preprocess<-function(X,hws=20,snr=20,iter=25,tol=0.2)
+{
+#Y<-transformIntensity(X,method="sqrt")
+Y<-smoothIntensity(X,method="SavitzkyGolay",halfWindowSize=hws)
+Y<-removeBaseline(Y,method="SNIP",iterations=iter)
+#Y<-calibrateIntensity(Y,method="PQN")
+#Y<-alignSpectra(Y,halfWindowSize=hws,SNR=snr,tolerance=tol,warpingMethod="lowess")
+return(Y)
+}
+
+
+peaks<-function(X, hws=20, snr=5,tol=0.2,minfreq=0)
+{
+#detect peak with determined SNR
+pk<-detectPeaks(X,method="MAD",halfWindowSize=hws,SNR=snr)
+
+#peak binning
+pk<-binPeaks(pk,tolerance=tol)
+
+#filter peaks, remove peaks having less than a min threshold of occurence, optional
+pk<-filterPeaks(pk,minFrequency=minfreq)
+return(pk)
+}
+
+surfmat<-function(X,M)
+{
+#creating precursor 2D matrices
+npeaks<-length(M[1,])
+nwells<-length(M[,1])
+coordinates<-matrix(0,nwells,2)
+for(i in 1:nwells)
+{coordinates[i,1]<-asc(substr(str_extract(X[[i]]@metaData$file,"[A-P][0-9]{1,2}"),1,1))-64;
+ coordinates[i,2]<-as.numeric(substr(str_extract(X[[i]]@metaData$file,"[A-P][0-9]{1,2}"),2,3));
+}
+
+#creating the 3D matrix
+xmax<-16
+ymax<-24
+mat<-array(0,c(xmax,ymax,npeaks))
+for(i in 1:nwells)
+{for(j in 1:npeaks)
+	{mat[coordinates[i,1],coordinates[i,2],j]<-M[i,j];
+	}
+}
+return(mat)
+}
+
+
+
+surf<-function(mat,M,pn=1,ad=FALSE,sc=FALSE,xrange=1:16,yrange=1:24)
+{
+#creating the surfaces
+npeaks<-length(M[1,])
+nwells<-length(M[,1])
+ncol<-256
+colmat<-array(0,dim(mat))
+for(i in 1:npeaks)colmat[xrange,yrange,i]<-cut(mat[xrange,yrange,i],ncol)
+persp3d(xrange,yrange,mat[xrange,yrange,pn],col=colour[colmat[xrange,yrange,pn]],add=ad,scale=sc,aspect=c(length(xrange),length(yrange)))
+persp(xrange,yrange,mat[xrange,yrange,pn],col=colour[colmat[xrange,yrange,pn]],theta=30,phi=15)
+}
+
+
+meanmedsurf<-function(mat,M,pn=1,xrange=1:16,yrange=1:24)
+{
+#getting median mode mad sd for each surface
+npeaks<-length(M[1,])
+nwells<-length(M[,1])
+ncol<-256
+colmat<-array(0,dim(mat))
+for(i in 1:npeaks)colmat[xrange,yrange,i]<-cut(mat[xrange,yrange,i],ncol)
+mediansurf<-array(0,dim(mat))
+meansurf<-array(0,dim(mat))
+rsd<-array(0,c(npeaks,2))
+num<-length(xrange)*length(yrange)
+for(i in 1:npeaks)
+{mediansurf[xrange,yrange,i]<-median(mat[xrange,yrange,i]);
+ meansurf[xrange,yrange,i]<-mean(mat[xrange,yrange,i]);
+ rsd[i,1]<-sqrt(sum((mat[xrange,yrange,i]-median(mat[xrange,yrange,i]))^2)/num)/median(mat[xrange,yrange,i]);
+ rsd[i,2]<-sd(mat[xrange,yrange,i])/mean(mat[xrange,yrange,i]);
+}
+
+#adding the mean and median surfaces
+persp3d(xrange,yrange,mat[xrange,yrange,pn],col=colour[colmat[xrange,yrange,pn]],aspect=c(length(xrange),length(yrange)))
+persp3d(xrange,yrange,mediansurf[xrange,yrange,pn],col=colour[colmat[xrange,yrange,pn]],add=TRUE,aspect=c(length(xrange),length(yrange)))
+persp3d(xrange,yrange,meansurf[xrange,yrange,pn],col=colour[colmat[xrange,yrange,pn]],add=TRUE,aspect=c(length(xrange),length(yrange)))
+persp(xrange,yrange,mat[xrange,yrange,pn],col=colour[colmat[xrange,yrange,pn]],theta=45,phi=45,asp=1)
+
+#getting sd(better representation for fewer stained wells) and mad(better representation for larger stained wells) for the surfaces
+return(rsd)
+}
+
+
+#intensity distribution matrix
+
+intdist<-function(conc=c("10","40","160","640","2560","10240","40960","163840"),n=3)
+{distmat<-matrix(0,length(conc),n)
+ for(i in 1:length(conc))
+ {for(j in 1:n)
+  {index<-as.integer(readline(prompt = paste("enter ",j," index of conc. ",conc[i],": ")))
+   distmat[i,j]<-index
+  }
+ }
+ return(distmat)
+}
+
+#average intensity
+averageint<-function(M,distmat,conc=c("10","40","160","640","2560","10240","40960","163840"))
+{npeaks<-dim(M)[2]
+ avg<-matrix(0,length(conc),npeaks)
+ rownames(avg)<-conc
+ n<-dim(distmat)[2]
+ for(i in 1:length(conc))
+ {for(j in 1:n)
+  {avg[i,]=avg[i,] + M[distmat[i,j],]
+  }
+  avg[i,]=avg[i,]/n
+ }
+ return(avg)
+}
+
+#normalization
+
+normmat<-function(mat,reppk=1)
+{
+ npeaks<-dim(mat)[3]
+ matnorm<-mat
+ for(z in 1:npeaks)
+ {for(x in 1:16)
+   {for(y in 1:24)
+    {if(mat[x,y,reppk] !=0)
+       {matnorm[x,y,z]=mat[x,y,z]/mat[x,y,reppk]}
+    }
+  }
+ }
+ return(matnorm)
+}
+
+normM<-function(M,reppk=1)
+{npeaks<-dim(M)[2]
+ Mnorm<-M
+ for(i in 1:npeaks)
+ {Mnorm[,i]=M[,i]/M[,reppk]}
+ return(Mnorm)
+}
+
+#flow
+xrange<-1:12
+yrange<-17:24
+xflatrange<-1:4
+yflatrange<-20:24
+
+plotpeaks<-c(1083.52,1099.55,1394.73,2446.98,2847.41)
+result<-array(0,c(length(plotpeaks)*5,5))
+n<-0
+
+subspec1<-importMzXml("calmix spotted_riddha run 36 lp 2500 subspectra 2")
+Y1<-preprocess(subspec1,hws=20,snr=20,tol=0.2,iter=50)
+pk1<-peaks(Y1,hws=20,snr=5,tol=0.5,minfreq=0.2)
+M1<-intensityMatrix(pk1,Y1)
+mat1<-surfmat(Y1,M1)
+npeaks1<-dim(M1)[2]
+reppk<-0
+ for(i in 1:npeaks1)
+  {str<-dimnames(M1)[[2]][i]
+   if(as.numeric(str)>233 && as.numeric(str)<233.5)
+      {reppk<-i}   
+  }
+Mnorm1<-normM(M1,reppk)
+matnorm1<-normmat(mat1,reppk)
+
+plotpeakindex<-array(0,length(plotpeaks))
+k<-1
+for(i in 1:npeaks1)
+{peak<-as.numeric(dimnames(M1)[[2]][i])
+ if(plotpeaks[k]>peak-0.2 && plotpeaks[k]<peak+0.2)
+    {plotpeakindex[k]<-i
+	 k=k+1
+	}
+}
+rsd<-meanmedsurf(mat1,M1,pn=350,xrange=xflatrange,yrange=yflatrange)
+rsdnorm<-meanmedsurf(matnorm1,Mnorm1,pn=350,xrange=xflatrange,yrange=yflatrange)
+for(i in 1:length(plotpeakindex))
+{pn=plotpeakindex[i]
+ n=n+1
+ png(paste("lp2300_ss2_wonorm_",dimnames(M1)[[2]][pn],".png"))
+ filled.contour(xrange,yrange,mat1[xrange,yrange,pn])
+ dev.off()
+ png(paste("lp2300_ss2_norm_",dimnames(M1)[[2]][pn],".png"))
+ filled.contour(xrange,yrange,matnorm1[xrange,yrange,pn])
+ dev.off()
+ result[n,]=c(as.numeric(dimnames(M1)[[2]][pn]),rsd[pn,1],rsd[pn,2],rsdnorm[pn,1],rsdnorm[pn,2])
+}
+
+subspec2<-importMzXml("calmix spotted_riddha run 37 lp 2500 subspectra 4")
+Y2<-preprocess(subspec2,hws=20,snr=20,tol=0.2,iter=50)
+pk2<-peaks(Y2,hws=20,snr=5,tol=0.5,minfreq=0.2)
+M2<-intensityMatrix(pk2,Y2)
+mat2<-surfmat(Y2,M2)
+npeaks2<-dim(M2)[2]
+reppk<-0
+ for(i in 1:npeaks2)
+  {str<-dimnames(M2)[[2]][i]
+   if(as.numeric(str)>233 && as.numeric(str)<233.5)
+      {reppk<-i}   
+  }
+Mnorm2<-normM(M2,reppk)
+matnorm2<-normmat(mat2,reppk)
+
+plotpeakindex<-array(0,length(plotpeaks))
+k<-1
+for(i in 1:npeaks2)
+{peak<-as.numeric(dimnames(M2)[[2]][i])
+ if(plotpeaks[k]>peak-0.2 && plotpeaks[k]<peak+0.2)
+    {plotpeakindex[k]<-i
+	 k<-k+1
+	}
+}
+rsd<-meanmedsurf(mat2,M2,pn=350,xrange=xflatrange,yrange=yflatrange)
+rsdnorm<-meanmedsurf(matnorm2,Mnorm2,pn=350,xrange=xflatrange,yrange=yflatrange)
+for(i in 1:length(plotpeakindex))
+{pn=plotpeakindex[i]
+ n=n+1
+ png(paste("lp2300_ss4_wonorm_",dimnames(M2)[[2]][pn],".png"))
+ filled.contour(xrange,yrange,mat2[xrange,yrange,pn])
+ dev.off()
+ png(paste("lp2300_ss4_norm_",dimnames(M2)[[2]][pn],".png"))
+ filled.contour(xrange,yrange,matnorm2[xrange,yrange,pn])
+ dev.off()
+ result[n,]=c(as.numeric(dimnames(M2)[[2]][pn]),rsd[pn,1],rsd[pn,2],rsdnorm[pn,1],rsdnorm[pn,2])
+}
+
+subspec3<-importMzXml("calmix spotted_riddha run 38 lp 2500 subspectra 8")
+Y3<-preprocess(subspec3,hws=20,snr=20,tol=0.2,iter=50)
+pk3<-peaks(Y3,hws=20,snr=5,tol=0.5,minfreq=0.2)
+M3<-intensityMatrix(pk3,Y3)
+mat3<-surfmat(Y3,M3)
+npeaks3<-dim(M3)[2]
+reppk<-0
+ for(i in 1:npeaks3)
+  {str<-dimnames(M3)[[2]][i]
+   if(as.numeric(str)>233 && as.numeric(str)<233.5)
+      {reppk<-i}   
+  }
+Mnorm3<-normM(M3,reppk)
+matnorm3<-normmat(mat3,reppk)
+
+plotpeakindex<-array(0,length(plotpeaks))
+k<-1
+for(i in 1:npeaks3)
+{peak<-as.numeric(dimnames(M3)[[2]][i])
+ if(plotpeaks[k]>peak-0.2 && plotpeaks[k]<peak+0.2)
+    {plotpeakindex[k]<-i
+	 k<-k+1
+	}
+}
+rsd<-meanmedsurf(mat3,M3,pn=350,xrange=xflatrange,yrange=yflatrange)
+rsdnorm<-meanmedsurf(matnorm3,Mnorm3,pn=350,xrange=xflatrange,yrange=yflatrange)
+for(i in 1:length(plotpeakindex))
+{pn=plotpeakindex[i]
+ n=n+1
+ png(paste("lp2300_ss8_wonorm_",dimnames(M3)[[2]][pn],".png"))
+ filled.contour(xrange,yrange,mat3[xrange,yrange,pn])
+ dev.off()
+ png(paste("lp2300_ss8_norm_",dimnames(M3)[[2]][pn],".png"))
+ filled.contour(xrange,yrange,matnorm3[xrange,yrange,pn])
+ dev.off()
+ result[n,]=c(as.numeric(dimnames(M3)[[2]][pn]),rsd[pn,1],rsd[pn,2],rsdnorm[pn,1],rsdnorm[pn,2])
+}
+
+subspec4<-importMzXml("calmix spotted_riddha run 39 lp 2500 subspectra 12")
+Y4<-preprocess(subspec4,hws=20,snr=20,tol=0.2,iter=50)
+pk4<-peaks(Y4,hws=20,snr=5,tol=0.5,minfreq=0.2)
+M4<-intensityMatrix(pk4,Y4)
+mat4<-surfmat(Y4,M4)
+npeaks4<-dim(M4)[2]
+reppk<-0
+ for(i in 1:npeaks4)
+  {str<-dimnames(M4)[[2]][i]
+   if(as.numeric(str)>233 && as.numeric(str)<233.5)
+      {reppk<-i}   
+  }
+Mnorm4<-normM(M4,reppk)
+matnorm4<-normmat(mat4,reppk)
+
+plotpeakindex<-array(0,length(plotpeaks))
+k<-1
+for(i in 1:npeaks4)
+{peak<-as.numeric(dimnames(M4)[[2]][i])
+ if(plotpeaks[k]>peak-0.2 && plotpeaks[k]<peak+0.2)
+    {plotpeakindex[k]<-i
+	 k<-k+1
+	}
+}
+rsd<-meanmedsurf(mat4,M4,pn=350,xrange=xflatrange,yrange=yflatrange)
+rsdnorm<-meanmedsurf(matnorm4,Mnorm4,pn=350,xrange=xflatrange,yrange=yflatrange)
+for(i in 1:length(plotpeakindex))
+{pn=plotpeakindex[i]
+ n=n+1
+ png(paste("lp2300_ss12_wonorm_",dimnames(M4)[[2]][pn],".png"))
+ filled.contour(xrange,yrange,mat4[xrange,yrange,pn])
+ dev.off()
+ png(paste("lp2300_ss12_norm_",dimnames(M4)[[2]][pn],".png"))
+ filled.contour(xrange,yrange,matnorm4[xrange,yrange,pn])
+ dev.off()
+ result[n,]=c(as.numeric(dimnames(M4)[[2]][pn]),rsd[pn,1],rsd[pn,2],rsdnorm[pn,1],rsdnorm[pn,2])
+}
+
+subspec5<-importMzXml("calmix spotted_riddha run 40 lp 2500 subspectra 20")
+Y5<-preprocess(subspec5,hws=20,snr=20,tol=0.2,iter=50)
+pk5<-peaks(Y5,hws=20,snr=5,tol=0.5,minfreq=0.2)
+M5<-intensityMatrix(pk5,Y5)
+mat5<-surfmat(Y5,M5)
+npeaks5<-dim(M5)[2]
+reppk<-0
+ for(i in 1:npeaks5)
+  {str<-dimnames(M5)[[2]][i]
+   if(as.numeric(str)>233 && as.numeric(str)<233.5)
+      {reppk<-i}   
+  }
+Mnorm5<-normM(M5,reppk)
+matnorm5<-normmat(mat5,reppk)
+
+plotpeakindex<-array(0,length(plotpeaks))
+k<-1
+for(i in 1:npeaks5)
+{peak<-as.numeric(dimnames(M5)[[2]][i])
+ if(plotpeaks[k]>peak-0.2 && plotpeaks[k]<peak+0.2)
+    {plotpeakindex[k]<-i
+	 k<-k+1
+	}
+}
+rsd<-meanmedsurf(mat5,M5,pn=350,xrange=xflatrange,yrange=yflatrange)
+rsdnorm<-meanmedsurf(matnorm5,Mnorm5,pn=350,xrange=xflatrange,yrange=yflatrange)
+for(i in 1:length(plotpeakindex))
+{pn=plotpeakindex[i]
+ n=n+1
+ png(paste("lp2300_ss20_wonorm_",dimnames(M5)[[2]][pn],".png"))
+ filled.contour(xrange,yrange,mat5[xrange,yrange,pn])
+ dev.off()
+ png(paste("lp2300_ss20_norm_",dimnames(M5)[[2]][pn],".png"))
+ filled.contour(xrange,yrange,matnorm5[xrange,yrange,pn])
+ dev.off()
+ result[n,]=c(as.numeric(dimnames(M5)[[2]][pn]),rsd[pn,1],rsd[pn,2],rsdnorm[pn,1],rsdnorm[pn,2])
+}
+
+write.table(result,file="result.txt",sep="\t")

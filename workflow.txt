@@ -1,0 +1,214 @@
+#importing libraries
+library(MALDIquant)
+library(MALDIquantForeign)
+library(rgl)
+library(stringr)
+library(gtools)
+library(neuralnet)
+
+#set working directory
+setwd("E:/sinpdata/calmix spotted riddha/laser power/calmix spotted_riddha run 9 lp 4000")
+
+#import mzxml files
+X<-importMzXml("plate clean sudeshna_25.5.16")
+X
+summary(X)
+
+#plotting
+l<-length(X)
+plot(X[[1]] @mass, X[[1]] @intensity, type ="n", , xlab="Mass", ylab="Intensity")
+for(i in 1:l){lines(X[[i]] @mass, X[[i]] @intensity, type="l", col=rainbow(l)[i])}
+
+#preprocessing
+preprocess<-function(X,hws=20,snr=20,iter=50,tol=0.5)
+{
+Y<-transformIntensity(X,method="sqrt")
+Y<-smoothIntensity(Y,method="SavitzkyGolay",halfWindowSize=hws)
+Y<-removeBaseline(Y,method="SNIP",iterations=iter)
+Y<-calibrateIntensity(Y,method="median")
+Y<-alignSpectra(Y,halfWindowSize=hws,SNR=snr,tolerance=tol,warpingMethod="lowess")
+return(Y)
+}
+Y<-preprocess(X)
+
+#average spectra
+avg<-averageMassSpectra(Y,method="median")
+
+#check noise to decide SNR: repeat and check in plot
+noise<-estimateNoise(avg)
+plot(avg)
+lines(noise,col="red")
+lines(noise[,1],noise[,2]*4,col="blue")
+
+peaks<-function(X, hws=20, snr=20,tol=0.5,minfreq=0.2)
+{
+
+#detect peak with determined SNR
+pk<-detectPeaks(X,method="MAD",halfWindowSize=hws,SNR=snr)
+
+#peak binning
+pk<-binPeaks(pk,tolerance=tol)
+
+#filter peaks, remove peaks having less than a min threshold of occurence, optional
+pk<-filterPeaks(pk,minFrequency=minfreq)
+return(pk)
+}
+
+#peaks<-filterPeaks(binPeaks(detectPeaks(Y,method="MAD",SNR=20,halfWindowSize=10),tolerance=0.05),minFrequency=0.2)
+
+#generating the feature matrix
+M<-intensityMatrix(peaks,Y)
+
+#export to a txt file, csv
+write.table(M,file="M.txt",sep=",")
+
+#creating precursor 2D matrices
+npeaks<-length(M[1,])
+nwells<-length(M[,1])
+coordinates<-matrix(0,nwells,2)
+for(i in 1:nwells)
+{coordinates[i,1]<-asc(substr(str_extract(X[[i]]@metaData$file,"[A-P][0-9]{1,2}"),1,1))-64;
+ coordinates[i,2]<-as.numeric(substr(str_extract(X[[i]]@metaData$file,"[A-P][0-9]{1,2}"),2,3));
+}
+
+#creating the 3D matrix
+xmax<-16
+ymax<-24
+mat<-array(0,c(xmax,ymax,npeaks))
+for(i in 1:nwells)
+{for(j in 1:npeaks)
+    {mat[coordinates[i,1],coordinates[i,2],j]<-M[i,j];
+    }
+}
+
+#creating the surfaces
+ncol<-256
+colmat<-array(0,dim(mat))
+for(i in 1:npeaks)colmat[,,i]<-cut(mat[,,i],ncol)
+pn<-45 #peak number
+persp3d(mat[,,pn],col=colour[colmat[,,pn]])
+persp(mat[,,pn],col=colour[colmat[,,pn]],theta=45,phi=45)
+
+#getting median mode mad sd for each surface
+mediansurf<-array(0,dim(mat))
+meansurf<-array(0,dim(mat))
+mad<-array(0,npeaks)
+sd<-array(0,npeaks)
+for(i in 1:npeaks)
+{mediansurf[,,i]<-median(mat[,,i]);
+ meansurf[,,i]<-mean(mat[,,i]);
+ mad[i]<-mad(mat[,,i]);
+ sd[i]<-sd(mat[,,i]);
+}
+
+#adding the mean and median surfaces
+persp3d(mat[,,pn],col=colour[colmat[,,pn]])
+persp3d(mediansurf[,,pn],col=colour[colmat[,,pn]],add=TRUE)
+persp3d(meansurf[,,pn],col=colour[colmat[,,pn]],add=TRUE)
+
+#getting sd(better representation for fewer stained wells) and mad(better representation for larger stained wells) for the surfaces
+mad[pn]
+sd[pn]
+
+#get image representation
+xrange<-1:16
+yrange<-1:24
+filled.contour(x=xrange,y=yrange,mat[xrange,yrange,pn])
+
+#fragmentation
+fragments<-function(M,massA,massfrag,par=1.8,order=1)
+{
+ npeaks<-dim(M)[2]
+ for(i in 1:npeaks)
+  {str<-dimnames(M)[[2]][i]
+   if(as.numeric(str)>massA && as.numeric(str)<massA+1)
+      {keyA<-str}
+   if(as.numeric(str)>massfrag && as.numeric(str)<massfrag+1)
+      {keyfrag<-str}
+  }
+x<-M[,keyA]
+y<-M[,keyfrag]
+plot(x,y,xlab=keyA,ylab=keyfrag)
+
+#smoothingSpline<-smooth.spline(M[,keyA],M[,keyfrag],spar=par)
+#lines(smoothingSpline)
+
+fit<-lm(y~poly(x,order,raw=TRUE))
+x<-sort(x)
+ycal<-array(0)
+for(i in 1:order+1)
+{ycal<-ycal+coef(fit)[i]*(x^(i-1))
+}
+lines(x,ycal,col="red")
+return(fit)
+}
+
+
+#blank subtraction(incorporate where applicable)
+#blank<-"H8"
+#blankrun<-0
+#for(i in 1:nwells){if(str_extract(Y[[i]]@metaData$file,"[A-P][0-9]{1,2}") == blank){blankrun<-i}}
+#MblankSub<-M
+#for(i in 1:nwells)MblankSub[i,]<-M[i,]-M[blankrun,]
+
+
+
+
+#normalization
+
+normmat<-function(mat,reppk=1)
+{
+ npeaks<-dim(mat)[3]
+ matnorm<-mat
+ for(z in 1:npeaks)
+ {for(x in 1:4)
+   {for(y in 1:6)
+    {if(mat[x,y,reppk] !=0)
+       {matnorm[x,y,z]=mat[x,y,z]/mat[x,y,reppk]}
+    }
+  }
+ }
+ return(matnorm)
+}
+
+normM<-function(M,reppk=1)
+{npeaks<-dim(M)[2]
+ Mnorm<-M
+ for(i in 1:npeaks)
+ {Mnorm[,i]=M[,i]/M[,reppk]}
+ return(Mnorm)
+}
+
+
+#avg
+avg<-matrix(0,8,npeaks)
+rownames(avgnorm2)<-c("50","25","12.5","6.25","3.125","1.5625","0.78125","0.390625")
+avgnorm2["50",]=(Mnorm2[7,]+Mnorm2[8,]+Mnorm2[18,])/3
+avgnorm2["25",]=(Mnorm2[1,]+Mnorm2[6,]+Mnorm2[24,])/3
+avgnorm2["12.5",]=(Mnorm2[2,]+Mnorm2[3,]+Mnorm2[19,])/3
+avgnorm2["6.25",]=(Mnorm2[9,]+Mnorm2[10,]+Mnorm2[14,])/3
+avgnorm2["3.125",]=(Mnorm2[17,]+Mnorm2[22,]+Mnorm2[23,])/3
+avgnorm2["1.5625",]=(Mnorm2[15,]+Mnorm2[16,]+Mnorm2[21,])/3
+avgnorm2["0.78125",]=(Mnorm2[20,]+Mnorm2[11,]+Mnorm2[12,])/3
+avgnorm2["0.390625",]=(Mnorm2[4,]+Mnorm2[5,]+Mnorm2[13,])/3
+
+
+#average spectra
+avg<-averageMassSpectra(Y,method="median")
+
+#check noise to decide SNR: repeat and check in plot
+snr<-20
+noise<-estimateNoise(avg)
+plot(avg)
+lines(noise,col="red")
+lines(noise[,1],noise[,2]*snr,col="blue")
+
+#imaging
+ filled.contour(xrange,yrange,mat1[xrange,yrange,353], col = rainbow(22))
+
+#blank subtraction(incorporate where applicable)
+#blank<-"H8"
+#blankrun<-0
+#for(i in 1:nwells){if(str_extract(Y[[i]]@metaData$file,"[A-P][0-9]{1,2}") == blank){blankrun<-i}}
+#MblankSub<-M
+#for(i in 1:nwells)MblankSub[i,]<-M[i,]-M[blankrun,]

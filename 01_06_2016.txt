@@ -1,0 +1,267 @@
+#importing libraries
+library(MALDIquant)
+library(MALDIquantForeign)
+library(rgl)
+library(stringr)
+library(gtools)
+library(neuralnet)
+
+#preprocessing
+preprocess<-function(X,hws=20,snr=20,iter=25,tol=0.2)
+{
+#Y<-transformIntensity(X,method="sqrt")
+Y<-smoothIntensity(X,method="SavitzkyGolay",halfWindowSize=hws)
+Y<-removeBaseline(Y,method="SNIP",iterations=iter)
+#Y<-calibrateIntensity(Y,method="PQN")
+Y<-alignSpectra(Y,halfWindowSize=hws,SNR=snr,tolerance=tol,warpingMethod="lowess")
+return(Y)
+}
+
+
+peaks<-function(X, hws=20, snr=5,tol=0.2,minfreq=0)
+{
+#detect peak with determined SNR
+pk<-detectPeaks(X,method="MAD",halfWindowSize=hws,SNR=snr)
+
+#peak binning
+pk<-binPeaks(pk,tolerance=tol)
+
+#filter peaks, remove peaks having less than a min threshold of occurence, optional
+pk<-filterPeaks(pk,minFrequency=minfreq)
+return(pk)
+}
+
+surfmat<-function(X,M)
+{
+#creating precursor 2D matrices
+npeaks<-length(M[1,])
+nwells<-length(M[,1])
+coordinates<-matrix(0,nwells,2)
+for(i in 1:nwells)
+{coordinates[i,1]<-asc(substr(str_extract(X[[i]]@metaData$file,"[A-P][0-9]{1,2}"),1,1))-64;
+ coordinates[i,2]<-as.numeric(substr(str_extract(X[[i]]@metaData$file,"[A-P][0-9]{1,2}"),2,3));
+}
+
+#creating the 3D matrix
+xmax<-16
+ymax<-24
+mat<-array(0,c(xmax,ymax,npeaks))
+for(i in 1:nwells)
+{for(j in 1:npeaks)
+	{mat[coordinates[i,1],coordinates[i,2],j]<-M[i,j];
+	}
+}
+return(mat)
+}
+
+
+
+surf<-function(mat,M,pn=1,ad=FALSE,sc=FALSE,xrange=1:16,yrange=1:24)
+{
+#creating the surfaces
+npeaks<-length(M[1,])
+nwells<-length(M[,1])
+ncol<-256
+colmat<-array(0,dim(mat))
+for(i in 1:npeaks)colmat[xrange,yrange,i]<-cut(mat[xrange,yrange,i],ncol)
+persp3d(mat[xrange,yrange,pn],col=colour[colmat[xrange,yrange,pn]],add=ad,scale=sc)
+persp(mat[xrange,yrange,pn],col=colour[colmat[xrange,yrange,pn]],theta=45,phi=45)
+}
+
+
+meanmedsurf<-function(mat,M,pn=1,xrange=1:16,yrange=1:24)
+{
+#getting median mode mad sd for each surface
+npeaks<-length(M[1,])
+nwells<-length(M[,1])
+ncol<-256
+colmat<-array(0,dim(mat))
+for(i in 1:npeaks)colmat[xrange,yrange,i]<-cut(mat[xrange,yrange,i],ncol)
+mediansurf<-array(0,dim(mat))
+meansurf<-array(0,dim(mat))
+madsd<-array(0,c(npeaks,2))
+for(i in 1:npeaks)
+{mediansurf[xrange,yrange,i]<-median(mat[xrange,yrange,i]);
+ meansurf[xrange,yrange,i]<-mean(mat[xrange,yrange,i]);
+ madsd[i,1]<-mad(mat[xrange,yrange,i]);
+ madsd[i,2]<-sd(mat[xrange,yrange,i]);
+}
+
+#adding the mean and median surfaces
+persp3d(mat[xrange,yrange,pn],col=colour[colmat[xrange,yrange,pn]])
+persp3d(mediansurf[xrange,yrange,pn],col=colour[colmat[xrange,yrange,pn]],add=TRUE)
+persp3d(meansurf[xrange,yrange,pn],col=colour[colmat[xrange,yrange,pn]],add=TRUE)
+persp(mat[xrange,yrange,pn],col=colour[colmat[xrange,yrange,pn]],theta=45,phi=45)
+
+#getting sd(better representation for fewer stained wells) and mad(better representation for larger stained wells) for the surfaces
+return(madsd)
+}
+
+
+#intensity distribution matrix
+
+intdist<-function(conc=c("10","40","160","640","2560","10240","40960","163840"),n=3)
+{distmat<-matrix(0,length(conc),n)
+ for(i in 1:length(conc))
+ {for(j in 1:n)
+  {index<-as.integer(readline(prompt = paste("enter ",j," index of conc. ",conc[i],": ")))
+   distmat[i,j]<-index
+  }
+ }
+ return(distmat)
+}
+
+#average intensity
+averageint<-function(M,distmat,conc=c("10","40","160","640","2560","10240","40960","163840"))
+{npeaks<-dim(M)[2]
+ avg<-matrix(0,length(conc),npeaks)
+ rownames(avg)<-conc
+ n<-dim(distmat)[2]
+ for(i in 1:length(conc))
+ {for(j in 1:n)
+  {avg[i,]=avg[i,] + M[distmat[i,j],]
+  }
+  avg[i,]=avg[i,]/n
+ }
+ return(avg)
+}
+
+#normalization
+
+normmat<-function(mat,reppk=1)
+{
+ npeaks<-dim(mat)[3]
+ matnorm<-mat
+ for(z in 1:npeaks)
+ {for(x in 1:16)
+   {for(y in 1:24)
+    {if(mat[x,y,reppk] !=0)
+       {matnorm[x,y,z]=mat[x,y,z]/mat[x,y,reppk]}
+    }
+  }
+ }
+ return(matnorm)
+}
+
+normM<-function(M,reppk=1)
+{npeaks<-dim(M)[2]
+ Mnorm<-M
+ for(i in 1:npeaks)
+ {Mnorm[,i]=M[,i]/M[,reppk]}
+ return(Mnorm)
+}
+
+
+#flow
+
+subspec1<-importMzXml("JUNE LIPID_RUN 136")
+Y1<-preprocess(subspec1,hws=20,snr=20,tol=0.2,iter=50)
+pk1<-peaks(Y1,hws=20,snr=5,tol=0.2,minfreq=0.2)
+M1<-intensityMatrix(pk1,Y1)
+mat1<-surfmat(Y1,M1)
+avg1<-averageint(M1,distmat)
+npeaks1<-dim(M1)[2]
+reppk<-0
+ for(i in 1:npeaks1)
+  {str<-dimnames(M1)[[2]][i]
+   if(as.numeric(str)>233 && as.numeric(str)<233.5)
+      {reppk<-i}   
+  }
+Mnorm1<-normM(M1,reppk)
+matnorm1<-normmat(mat1,reppk)
+avgnorm1<-averageint(Mnorm1,distmat)
+for(i in 1:npeaks1)
+{ png(paste("ss1",i,".png"))
+  plot(as.numeric(conc),avg1[,i])
+  dev.off()
+}
+
+subspec2<-importMzXml("JUNE LIPID_RUN 132")
+Y2<-preprocess(subspec2,hws=20,snr=20,tol=0.2,iter=50)
+pk2<-peaks(Y2,hws=20,snr=5,tol=0.2,minfreq=0.2)
+M2<-intensityMatrix(pk2,Y2)
+mat2<-surfmat(Y2,M2)
+avg2<-averageint(M2,distmat)
+npeaks2<-dim(M2)[2]
+reppk<-0
+ for(i in 1:npeaks2)
+  {str<-dimnames(M2)[[2]][i]
+   if(as.numeric(str)>233 && as.numeric(str)<233.5)
+      {reppk<-i}   
+  }
+Mnorm2<-normM(M2,reppk)
+matnorm2<-normmat(mat2,reppk)
+avgnorm2<-averageint(Mnorm2,distmat)
+for(i in 1:npeaks2)
+{ png(paste("ss2 ",i,".png"))
+  plot(as.numeric(conc),avg2[,i])
+  dev.off()
+}
+
+subspec3<-importMzXml("JUNE LIPID_RUN 133")
+Y3<-preprocess(subspec3,hws=20,snr=20,tol=0.2,iter=50)
+pk3<-peaks(Y3,hws=20,snr=5,tol=0.2,minfreq=0.2)
+M3<-intensityMatrix(pk3,Y3)
+mat3<-surfmat(Y3,M3)
+avg3<-averageint(M3,distmat)
+npeaks3<-dim(M3)[2]
+reppk<-0
+ for(i in 1:npeaks3)
+  {str<-dimnames(M3)[[2]][i]
+   if(as.numeric(str)>233 && as.numeric(str)<233.5)
+      {reppk<-i}   
+  }
+Mnorm3<-normM(M3,reppk)
+matnorm3<-normmat(mat3,reppk)
+avgnorm3<-averageint(Mnorm3,distmat)
+for(i in 1:npeaks3)
+{ png(paste("ss3 ",i,".png"))
+  plot(as.numeric(conc),avg3[,i])
+  dev.off()
+}
+
+subspec4<-importMzXml("JUNE LIPID_RUN 134")
+Y4<-preprocess(subspec4,hws=20,snr=20,tol=0.2,iter=50)
+pk4<-peaks(Y4,hws=20,snr=5,tol=0.2,minfreq=0.2)
+M4<-intensityMatrix(pk4,Y4)
+mat4<-surfmat(Y4,M4)
+avg4<-averageint(M4,distmat)
+npeaks4<-dim(M4)[2]
+reppk<-0
+ for(i in 1:npeaks4)
+  {str<-dimnames(M4)[[2]][i]
+   if(as.numeric(str)>233 && as.numeric(str)<233.5)
+      {reppk<-i}   
+  }
+Mnorm4<-normM(M4,reppk)
+matnorm4<-normmat(mat4,reppk)
+avgnorm4<-averageint(Mnorm4,distmat)
+for(i in 1:npeaks4)
+{ png(paste("ss4 ",i,".png"))
+  plot(as.numeric(conc),avg4[,i])
+  dev.off()
+}
+
+
+subspec5<-importMzXml("JUNE LIPID_RUN 135")
+Y5<-preprocess(subspec5,hws=20,snr=20,tol=0.2,iter=50)
+pk5<-peaks(Y5,hws=20,snr=5,tol=0.2,minfreq=0.2)
+M5<-intensityMatrix(pk5,Y5)
+mat5<-surfmat(Y5,M5)
+avg5<-averageint(M5,distmat)
+npeaks5<-dim(M5)[2]
+reppk<-0
+ for(i in 1:npeaks5)
+  {str<-dimnames(M5)[[2]][i]
+   if(as.numeric(str)>233 && as.numeric(str)<233.5)
+      {reppk<-i}   
+  }
+Mnorm5<-normM(M5,reppk)
+matnorm5<-normmat(mat5,reppk)
+avgnorm5<-averageint(Mnorm5,distmat)
+for(i in 1:npeaks5)
+{ png(paste("ss5 ",i,".png"))
+  plot(as.numeric(conc),avg5[,i])
+  dev.off()
+}
+
